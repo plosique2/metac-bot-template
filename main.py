@@ -25,68 +25,97 @@ from forecasting_tools import (
 logger = logging.getLogger(__name__)
 
 
-class TemplateForecaster(ForecastBot):
+class SuperForecaster(ForecastBot):
     """
-    This is a copy of the template bot for Q2 2025 Metaculus AI Tournament.
-    The official bots on the leaderboard use AskNews in Q2.
-    Main template bot changes since Q1
-    - Support for new units parameter was added
-    - You now set your llms when you initialize the bot (making it easier to switch between and benchmark different models)
+    Enhanced forecasting bot implementing superforecasting principles:
+    - Aggregates multiple diverse research sources for more robust information
+    - Uses reference class forecasting to ground predictions in base rates
+    - Implements Tetlock's superforecasting principles: probabilistic thinking, belief updating, etc.
+    - Multiple prediction runs for higher accuracy and confidence intervals
 
     The main entry point of this bot is `forecast_on_tournament` in the parent class.
     See the script at the bottom of the file for more details on how to run the bot.
-    Ignoring the finer details, the general flow is:
+    General flow:
     - Load questions from Metaculus
     - For each question
         - Execute run_research a number of times equal to research_reports_per_question
         - Execute respective run_forecast function `predictions_per_research_report * research_reports_per_question` times
-        - Aggregate the predictions
+        - Aggregate the predictions using aggregation techniques from superforecasting
         - Submit prediction (if publish_reports_to_metaculus is True)
     - Return a list of ForecastReport objects
 
-    Only the research and forecast functions need to be implemented in ForecastBot subclasses.
-
-    If you end up having trouble with rate limits and want to try a more sophisticated rate limiter try:
+    If needed, a more sophisticated rate limiter is available:
     ```
     from forecasting_tools.ai_models.resource_managers.refreshing_bucket_rate_limiter import RefreshingBucketRateLimiter
     rate_limiter = RefreshingBucketRateLimiter(
         capacity=2,
         refresh_rate=1,
-    ) # Allows 1 request per second on average with a burst of 2 requests initially. Set this as a class variable
-    await self.rate_limiter.wait_till_able_to_acquire_resources(1) # 1 because it's consuming 1 request (use more if you are adding a token limit)
+    ) # Allows 1 request per second on average with a burst of 2 requests initially
+    await self.rate_limiter.wait_till_able_to_acquire_resources(1)
     ```
-    Additionally OpenRouter has large rate limits immediately on account creation
     """
 
-    _max_concurrent_questions = 2  # Set this to whatever works for your search-provider/ai-model rate limits
+    _max_concurrent_questions = 3  # Increased for more parallel processing
     _concurrency_limiter = asyncio.Semaphore(_max_concurrent_questions)
 
     async def run_research(self, question: MetaculusQuestion) -> str:
+        """
+        Enhanced research function that tries to combine multiple sources 
+        when available for a more comprehensive analysis.
+        """
         async with self._concurrency_limiter:
-            research = ""
+            research_sources = []
+            
+            # Try to get research from each available provider
+            if os.getenv("EXA_API_KEY"):
+                try:
+                    exa_research = await self._call_exa_smart_searcher(question.question_text)
+                    if exa_research:
+                        research_sources.append(f"--- EXA SEARCH RESULTS ---\n{exa_research}")
+                except Exception as e:
+                    logger.warning(f"Error using Exa research for {question.page_url}: {str(e)}")
+            
             if os.getenv("ASKNEWS_CLIENT_ID") and os.getenv("ASKNEWS_SECRET"):
-                research = await AskNewsSearcher().get_formatted_news_async(
-                    question.question_text
-                )
-            elif os.getenv("EXA_API_KEY"):
-                research = await self._call_exa_smart_searcher(
-                    question.question_text
-                )
-            elif os.getenv("PERPLEXITY_API_KEY"):
-                research = await self._call_perplexity(question.question_text)
-            elif os.getenv("OPENROUTER_API_KEY"):
-                research = await self._call_perplexity(
-                    question.question_text, use_open_router=True
-                )
+                try:
+                    asknews_research = await AskNewsSearcher().get_formatted_news_async(question.question_text)
+                    if asknews_research:
+                        research_sources.append(f"--- ASKNEWS SEARCH RESULTS ---\n{asknews_research}")
+                except Exception as e:
+                    logger.warning(f"Error using AskNews research for {question.page_url}: {str(e)}")
+            
+            if os.getenv("PERPLEXITY_API_KEY"):
+                try:
+                    perplexity_research = await self._call_perplexity(question.question_text)
+                    if perplexity_research:
+                        research_sources.append(f"--- PERPLEXITY SEARCH RESULTS ---\n{perplexity_research}")
+                except Exception as e:
+                    logger.warning(f"Error using Perplexity research for {question.page_url}: {str(e)}")
+            
+            elif os.getenv("OPENROUTER_API_KEY") and not research_sources:
+                try:
+                    openrouter_research = await self._call_perplexity(question.question_text, use_open_router=True)
+                    if openrouter_research:
+                        research_sources.append(f"--- OPENROUTER SEARCH RESULTS ---\n{openrouter_research}")
+                except Exception as e:
+                    logger.warning(f"Error using OpenRouter research for {question.page_url}: {str(e)}")
+            
+            # Combine all research sources
+            if research_sources:
+                combined_research = "\n\n".join(research_sources)
+                
+                # If we have multiple sources, add a summarization step
+                if len(research_sources) > 1:
+                    try:
+                        summary = await self._summarize_multi_source_research(combined_research, question.question_text)
+                        combined_research = f"--- RESEARCH SUMMARY ---\n{summary}\n\n--- DETAILED SOURCES ---\n{combined_research}"
+                    except Exception as e:
+                        logger.warning(f"Error summarizing multi-source research: {str(e)}")
+                
+                logger.info(f"Found Research for URL {question.page_url}")
+                return combined_research
             else:
-                logger.warning(
-                    f"No research provider found when processing question URL {question.page_url}. Will pass back empty string."
-                )
-                research = ""
-            logger.info(
-                f"Found Research for URL {question.page_url}:\n{research}"
-            )
-            return research
+                logger.warning(f"No research provider found when processing question URL {question.page_url}. Will pass back empty string.")
+                return ""
 
     async def _call_perplexity(
         self, question: str, use_open_router: bool = False
@@ -115,67 +144,170 @@ class TemplateForecaster(ForecastBot):
 
     async def _call_exa_smart_searcher(self, question: str) -> str:
         """
-        SmartSearcher is a custom class that is a wrapper around an search on Exa.ai
+        Enhanced SmartSearcher implementation that does a more thorough job with Exa.ai
         """
         searcher = SmartSearcher(
             model=self.get_llm("default", "llm"),
             temperature=0,
-            num_searches_to_run=2,
-            num_sites_per_search=10,
+            num_searches_to_run=3,  # Increased from 2
+            num_sites_per_search=12,  # Increased from 10
         )
+        
+        # Enhanced prompt with focus on superforecasting principles
         prompt = (
-            "You are an assistant to a superforecaster. The superforecaster will give"
-            "you a question they intend to forecast on. To be a great assistant, you generate"
-            "a concise but detailed rundown of the most relevant news, including if the question"
-            "would resolve Yes or No based on current information. You do not produce forecasts yourself."
+            "You are a research assistant to a superforecaster. The superforecaster will give "
+            "you a question they intend to forecast on. To be a great assistant, you must: "
+            "1. Generate a comprehensive and factual rundown of relevant information "
+            "2. Find key statistics, historical precedents, and expert opinions "
+            "3. Identify recent developments that might change previous trends "
+            "4. Look for both confirming and disconfirming evidence "
+            "5. Avoid biases in your research and reporting "
+            "6. Focus on finding solid reference classes for base rates "
             f"\n\nThe question is: {question}"
-        )  # You can ask the searcher to filter by date, exclude/include a domain, and run specific searches for finding sources vs finding highlights within a source
-        response = await searcher.invoke(prompt)
-        return response
+        )
+        
+        # Add date filters to get both recent and historical context
+        date_filters = {
+            "recent": {"start_date": "now-30d"},
+            "relevant_history": {"start_date": "now-2y", "end_date": "now-30d"}
+        }
+        
+        # Get both recent and historical results
+        recent_response = await searcher.invoke(prompt + "\nPlease focus on the most recent developments.", date_filters["recent"])
+        historical_response = await searcher.invoke(prompt + "\nPlease focus on historical context and precedents.", date_filters["relevant_history"])
+        
+        # Combine results
+        combined_response = f"RECENT DEVELOPMENTS:\n{recent_response}\n\nHISTORICAL CONTEXT:\n{historical_response}"
+        
+        return combined_response
+        
+    async def _summarize_multi_source_research(self, combined_research: str, question: str) -> str:
+        """
+        Summarizes research from multiple sources to create a unified view, highlighting 
+        agreements and contradictions.
+        """
+        summarization_prompt = clean_indents(
+            f"""
+            You are a research analyst assisting a superforecaster.
+            
+            QUESTION TO FORECAST:
+            {question}
+            
+            You have been given research from multiple sources, and your job is to synthesize 
+            this information into a cohesive summary. Focus on:
+            
+            1. Key facts and data points that appear across multiple sources (high confidence)
+            2. Important points mentioned by only one source (require verification)
+            3. Any contradictions between sources (highlight uncertainty)
+            4. Relevant base rates and reference classes for this type of question
+            5. Current trends and how they might evolve
+            6. Identify what information is still missing that would be valuable
+            
+            FORMAT YOUR RESPONSE:
+            - Summary of Key Facts (75-150 words)
+            - Critical Data Points (bullet points of numbers, statistics, dates)
+            - Identified Reference Classes & Base Rates
+            - Areas of Uncertainty
+            - Current Trajectory
+            
+            RESEARCH FROM MULTIPLE SOURCES:
+            {combined_research}
+            """
+        )
+        
+        # Use a slightly higher temperature for summary to encourage synthesis
+        summary_llm = self.get_llm("summarizer", "llm") if "summarizer" in self.llms else self.get_llm("default", "llm")
+        summary = await summary_llm.invoke(summarization_prompt, temperature=0.3)
+        
+        return summary
 
     async def _run_forecast_on_binary(
         self, question: BinaryQuestion, research: str
     ) -> ReasonedPrediction[float]:
+        """
+        Enhanced binary forecasting model that implements superforecasting techniques:
+        - Reference class reasoning
+        - Base rate analysis
+        - Outside view consideration
+        - Pre-mortem analysis
+        - Multiple perspective taking
+        """
         prompt = clean_indents(
             f"""
-            You are a professional forecaster interviewing for a job.
-
-            Your interview question is:
+            You are a superforecaster trained in Tetlock's techniques for making accurate predictions.
+            
+            QUESTION:
             {question.question_text}
 
-            Question background:
+            BACKGROUND:
             {question.background_info}
 
-
-            This question's outcome will be determined by the specific criteria below. These criteria have not yet been satisfied:
+            RESOLUTION CRITERIA:
             {question.resolution_criteria}
-
+            
+            FINE PRINT:
             {question.fine_print}
 
-
-            Your research assistant says:
+            RESEARCH:
             {research}
 
-            Today is {datetime.now().strftime("%Y-%m-%d")}.
-
-            Before answering you write:
-            (a) The time left until the outcome to the question is known.
-            (b) The status quo outcome if nothing changed.
-            (c) A brief description of a scenario that results in a No outcome.
-            (d) A brief description of a scenario that results in a Yes outcome.
-
-            You write your rationale remembering that good forecasters put extra weight on the status quo outcome since the world changes slowly most of the time.
-
-            The last thing you write is your final answer as: "Probability: ZZ%", 0-100
+            TODAY'S DATE:
+            {datetime.now().strftime("%Y-%m-%d")}
+            
+            FORECASTING PROCESS:
+            Follow this structured superforecasting approach carefully:
+            
+            1) REFERENCE CLASSES & BASE RATES
+            - Identify at least 2-3 relevant reference classes for this question
+            - Research and state the base rates for each reference class 
+            - Assess which reference class is most applicable and why
+            
+            2) OUTSIDE VIEW VS INSIDE VIEW
+            - Outside view: What does history suggest about questions like this?
+            - Inside view: What specific factors make this situation unique?
+            - How should we weigh outside vs inside view for this question?
+            
+            3) KEY UNCERTAINTIES & VARIABLES
+            - List 3-5 key variables that will influence the outcome
+            - For each variable, estimate its impact on the probability
+            
+            4) PRE-MORTEM ANALYSIS
+            - Imagine it is resolution date and the answer is YES. Why did this happen?
+            - Imagine it is resolution date and the answer is NO. Why did this happen?
+            
+            5) FERMI DECOMPOSITION
+            - Break down this question into sub-components if applicable
+            - Calculate a probability based on the decomposition
+            
+            6) TIME HORIZON CONSIDERATIONS
+            - Analyze how the time until resolution affects your forecast
+            - Consider scenarios where events accelerate or decelerate
+            
+            7) MULTIPLE PERSPECTIVES
+            - Perspective 1: What would a conservative forecaster predict?
+            - Perspective 2: What would an aggressive forecaster predict?
+            - Perspective 3: What would a domain expert predict?
+            
+            8) FINAL SYNTHESIS
+            - Synthesize the above analyses into a probability judgment
+            - Explain which factors were most influential in your forecast
+            
+            FINAL PROBABILITY:
+            State your final prediction as: "Probability: ZZ%", where ZZ is between 0-100.
             """
         )
+        
         reasoning = await self.get_llm("default", "llm").invoke(prompt)
+        
+        # Extract the prediction using the PredictionExtractor
         prediction: float = PredictionExtractor.extract_last_percentage_value(
             reasoning, max_prediction=1, min_prediction=0
         )
+        
         logger.info(
             f"Forecasted URL {question.page_url} as {prediction} with reasoning:\n{reasoning}"
         )
+        
         return ReasonedPrediction(
             prediction_value=prediction, reasoning=reasoning
         )
@@ -183,52 +315,104 @@ class TemplateForecaster(ForecastBot):
     async def _run_forecast_on_multiple_choice(
         self, question: MultipleChoiceQuestion, research: str
     ) -> ReasonedPrediction[PredictedOptionList]:
+        """
+        Enhanced multiple choice forecasting implementing superforecasting techniques
+        for discrete option probabilities.
+        """
         prompt = clean_indents(
             f"""
-            You are a professional forecaster interviewing for a job.
+            You are an elite superforecaster specializing in multiple choice probabilistic forecasting.
 
-            Your interview question is:
+            QUESTION:
             {question.question_text}
 
-            The options are: {question.options}
+            OPTIONS:
+            {question.options}
 
-
-            Background:
+            BACKGROUND:
             {question.background_info}
 
+            RESOLUTION CRITERIA:
             {question.resolution_criteria}
 
+            FINE PRINT:
             {question.fine_print}
 
-
-            Your research assistant says:
+            RESEARCH:
             {research}
 
-            Today is {datetime.now().strftime("%Y-%m-%d")}.
+            TODAY'S DATE:
+            {datetime.now().strftime("%Y-%m-%d")}
 
-            Before answering you write:
-            (a) The time left until the outcome to the question is known.
-            (b) The status quo outcome if nothing changed.
-            (c) A description of an scenario that results in an unexpected outcome.
+            FORECASTING PROCESS:
+            Follow this structured superforecasting approach for multiple choice questions:
 
-            You write your rationale remembering that (1) good forecasters put extra weight on the status quo outcome since the world changes slowly most of the time, and (2) good forecasters leave some moderate probability on most options to account for unexpected outcomes.
+            1) INITIAL ASSESSMENT
+            - For each option, identify its initial plausibility
+            - Consider the status quo and what would happen if nothing changed
+            - Identify which option(s) are considered the most likely by experts/markets
 
-            The last thing you write is your final probabilities for the N options in this order {question.options} as:
-            Option_A: Probability_A
-            Option_B: Probability_B
+            2) REFERENCE CLASSES
+            - For each option, identify relevant reference classes and base rates
+            - Compare the current situation to historical analogs
+            - Estimate the frequency with which similar options prevailed in comparable situations
+
+            3) OPTION-SPECIFIC ANALYSIS
+            - For each option, analyze the specific conditions needed for it to be the outcome
+            - Estimate the likelihood of those conditions occurring
+            - Consider unique factors that make each option more or less likely than historical base rates
+
+            4) KEY DRIVERS & UNCERTAINTIES
+            - Identify the key variables that could influence which option prevails
+            - For each variable, assess how likely it is to move in a direction favorable to each option
+            - Consider contingencies and dependencies between variables
+
+            5) SCENARIO MAPPING
+            - Map different possible future scenarios to each option
+            - Consider specific paths and timelines that lead to each option
+            - Identify critical junctures and decision points
+
+            6) CROSS-IMPACT ANALYSIS
+            - Analyze how the options interact with one another
+            - Consider whether some options are mutually exclusive or complementary
+            - Account for the possibility that the "correct" option might be a combination of listed options
+
+            7) MULTI-PERSPECTIVE FORECASTING
+            - Adopt different perspectives (optimistic, pessimistic, status quo, domain expert, etc.)
+            - Generate probability distributions from each perspective
+            - Reconcile these perspectives into a single coherent distribution
+
+            8) CALIBRATION & COHERENCE CHECK
+            - Ensure probabilities sum to 100%
+            - Leave appropriate probability mass on "unlikely" options to account for surprises
+            - Check that your distribution isn't overconfident or underconfident
+            - Consider whether your relative confidences across options are justified
+
+            FINAL FORECAST:
+            List your final probability for each option in the exact order specified: {question.options}
+            
+            Format your answer exactly as:
+            Option_A: Probability_A%
+            Option_B: Probability_B%
             ...
-            Option_N: Probability_N
+            Option_N: Probability_N%
+            
+            The probabilities must sum to 100%.
             """
         )
+        
         reasoning = await self.get_llm("default", "llm").invoke(prompt)
+        
         prediction: PredictedOptionList = (
             PredictionExtractor.extract_option_list_with_percentage_afterwards(
                 reasoning, question.options
             )
         )
+        
         logger.info(
             f"Forecasted URL {question.page_url} as {prediction} with reasoning:\n{reasoning}"
         )
+        
         return ReasonedPrediction(
             prediction_value=prediction, reasoning=reasoning
         )
@@ -236,68 +420,113 @@ class TemplateForecaster(ForecastBot):
     async def _run_forecast_on_numeric(
         self, question: NumericQuestion, research: str
     ) -> ReasonedPrediction[NumericDistribution]:
+        """
+        Enhanced numeric forecasting method implementing superforecasting techniques
+        for continuous distributions and calibration.
+        """
         upper_bound_message, lower_bound_message = (
             self._create_upper_and_lower_bound_messages(question)
         )
+        
         prompt = clean_indents(
             f"""
-            You are a professional forecaster interviewing for a job.
+            You are a world-class superforecaster specializing in quantitative predictions using techniques from statistics, decision science, and cognitive psychology.
 
-            Your interview question is:
+            QUESTION:
             {question.question_text}
 
-            Background:
+            BACKGROUND:
             {question.background_info}
 
+            RESOLUTION CRITERIA:
             {question.resolution_criteria}
 
+            FINE PRINT:
             {question.fine_print}
 
-            Units for answer: {question.unit_of_measure if question.unit_of_measure else "Not stated (please infer this)"}
+            UNITS FOR ANSWER: 
+            {question.unit_of_measure if question.unit_of_measure else "Not stated (please infer this)"}
 
-            Your research assistant says:
+            RESEARCH:
             {research}
 
-            Today is {datetime.now().strftime("%Y-%m-%d")}.
+            TODAY'S DATE:
+            {datetime.now().strftime("%Y-%m-%d")}
 
+            BOUNDS:
             {lower_bound_message}
             {upper_bound_message}
 
-            Formatting Instructions:
-            - Please notice the units requested (e.g. whether you represent a number as 1,000,000 or 1 million).
-            - Never use scientific notation.
-            - Always start with a smaller number (more negative if negative) and then increase from there
+            FORECASTING PROCESS:
+            Follow this structured process for making a precise quantitative forecast:
 
-            Before answering you write:
-            (a) The time left until the outcome to the question is known.
-            (b) The outcome if nothing changed.
-            (c) The outcome if the current trend continued.
-            (d) The expectations of experts and markets.
-            (e) A brief description of an unexpected scenario that results in a low outcome.
-            (f) A brief description of an unexpected scenario that results in a high outcome.
+            1) KEY METRICS & HISTORICAL DATA
+            - Identify key metrics related to this question
+            - Analyze historical trends and growth/decline rates
+            - Calculate relevant summary statistics (mean, median, growth rates)
 
-            You remind yourself that good forecasters are humble and set wide 90/10 confidence intervals to account for unknown unknowns.
+            2) COMPARABLE REFERENCE POINTS
+            - Identify comparable situations, entities, or historical periods 
+            - Extract numeric values from these comparables
+            - Calculate typical ranges and distributions
 
-            The last thing you write is your final answer as:
-            "
+            3) MODEL BUILDING
+            - Develop a simple model of the factors influencing this number
+            - Weight each factor by importance
+            - Consider how factors interact (multiplicative vs. additive effects)
+
+            4) SCENARIO ANALYSIS
+            - Baseline scenario: What happens if current trends continue?
+            - Pessimistic scenario: What realistic factors could drive the number lower?
+            - Optimistic scenario: What realistic factors could drive the number higher?
+            - Wild card scenario: What low-probability events could dramatically change the outcome?
+
+            5) MONTE CARLO SIMULATION REASONING
+            - Consider the distribution shape (normal, log-normal, power law, etc.)
+            - Identify key uncertainties and their distributions
+            - Reason through how these uncertainties would combine
+
+            6) FORECAST DISTRIBUTION
+            - Generate a full probability distribution, not just a point estimate
+            - Identify the median, mean, and various percentiles (10, 20, 40, 60, 80, 90)
+            - Check that these values are coherent (e.g., 80th percentile > 60th percentile)
+            - Ensure your distribution accounts for tail risks and unknown unknowns
+            - Double-check that your distribution respects any hard bounds specified
+
+            7) CALIBRATION CHECK
+            - How often have past forecasts in this domain been too high or too low?
+            - Do you need to widen your confidence intervals to avoid overconfidence?
+            - Would other forecasters produce similar or different distributions?
+
+            FORMATTING INSTRUCTIONS:
+            - Use the exact units requested (e.g., whether a number should be 1,000,000 or 1 million)
+            - Never use scientific notation
+            - Use comma separators for thousands (e.g., 1,234,567)
+            - Always arrange percentiles from smaller to larger numbers
+
+            FINAL FORECAST:
+            Provide your distribution as:
             Percentile 10: XX
             Percentile 20: XX
             Percentile 40: XX
             Percentile 60: XX
             Percentile 80: XX
             Percentile 90: XX
-            "
             """
         )
+        
         reasoning = await self.get_llm("default", "llm").invoke(prompt)
+        
         prediction: NumericDistribution = (
             PredictionExtractor.extract_numeric_distribution_from_list_of_percentile_number_and_probability(
                 reasoning, question
             )
         )
+        
         logger.info(
             f"Forecasted URL {question.page_url} as {prediction.declared_percentiles} with reasoning:\n{reasoning}"
         )
+        
         return ReasonedPrediction(
             prediction_value=prediction, reasoning=reasoning
         )
@@ -332,14 +561,14 @@ if __name__ == "__main__":
     litellm_logger.propagate = False
 
     parser = argparse.ArgumentParser(
-        description="Run the Q1TemplateBot forecasting system"
+        description="Run the SuperForecaster bot"
     )
     parser.add_argument(
         "--mode",
         type=str,
         choices=["tournament", "quarterly_cup", "test_questions"],
-        default="tournament",
-        help="Specify the run mode (default: tournament)",
+        default="test_questions",  # Default to test mode initially
+        help="Specify the run mode (default: test_questions)",
     )
     args = parser.parse_args()
     run_mode: Literal["tournament", "quarterly_cup", "test_questions"] = (
@@ -351,52 +580,58 @@ if __name__ == "__main__":
         "test_questions",
     ], "Invalid run mode"
 
-    template_bot = TemplateForecaster(
-        research_reports_per_question=1,
-        predictions_per_research_report=5,
-        use_research_summary_to_forecast=False,
+    # Create the superforecaster bot with enhanced configuration
+    superforecaster = SuperForecaster(
+        research_reports_per_question=2,  # Increased from 1 to get more diverse research
+        predictions_per_research_report=7, # Increased from 5 for better aggregation
+        use_research_summary_to_forecast=True,  # Enable summarization of research
         publish_reports_to_metaculus=True,
-        folder_to_save_reports_to=None,
+        folder_to_save_reports_to="forecast_reports/",  # Save reports for analysis
         skip_previously_forecasted_questions=True,
-        # llms={  # choose your model names or GeneralLlm llms here, otherwise defaults will be chosen for you
-        #     "default": GeneralLlm(
-        #         model="metaculus/anthropic/claude-3-5-sonnet-20241022",
-        #         temperature=0.3,
-        #         timeout=40,
-        #         allowed_tries=2,
-        #     ),
-        #     "summarizer": "openai/gpt-4o-mini",
-        # },
+        llms={  # Specify models with parameters
+            "default": GeneralLlm(
+                model="metaculus/anthropic/claude-3-5-sonnet-20241022",  # Using Anthropic's best model
+                temperature=0.2,  # Lower temperature for more consistent outputs
+                timeout=60,  # Increased timeout for more thorough analysis
+                allowed_tries=3,  # More retries
+            ),
+            "summarizer": GeneralLlm(
+                model="metaculus/openai/gpt-4o-mini",  # Use cheaper model for summarization
+                temperature=0.3,
+                timeout=30,
+            ),
+        },
     )
 
     if run_mode == "tournament":
         forecast_reports = asyncio.run(
-            template_bot.forecast_on_tournament(
+            superforecaster.forecast_on_tournament(
                 MetaculusApi.CURRENT_AI_COMPETITION_ID, return_exceptions=True
             )
         )
     elif run_mode == "quarterly_cup":
-        # The quarterly cup is a good way to test the bot's performance on regularly open questions. You can also use AXC_2025_TOURNAMENT_ID = 32564
-        # The new quarterly cup may not be initialized near the beginning of a quarter
-        template_bot.skip_previously_forecasted_questions = False
+        # The quarterly cup is a good way to test the bot's performance on regularly open questions
+        superforecaster.skip_previously_forecasted_questions = False
         forecast_reports = asyncio.run(
-            template_bot.forecast_on_tournament(
+            superforecaster.forecast_on_tournament(
                 MetaculusApi.CURRENT_QUARTERLY_CUP_ID, return_exceptions=True
             )
         )
     elif run_mode == "test_questions":
-        # Example questions are a good way to test the bot's performance on a single question
+        # Example questions for testing our superforecaster
         EXAMPLE_QUESTIONS = [
             "https://www.metaculus.com/questions/578/human-extinction-by-2100/",  # Human Extinction - Binary
             "https://www.metaculus.com/questions/14333/age-of-oldest-human-as-of-2100/",  # Age of Oldest Human - Numeric
             "https://www.metaculus.com/questions/22427/number-of-new-leading-ai-labs/",  # Number of New Leading AI Labs - Multiple Choice
         ]
-        template_bot.skip_previously_forecasted_questions = False
+        superforecaster.skip_previously_forecasted_questions = False
         questions = [
             MetaculusApi.get_question_by_url(question_url)
             for question_url in EXAMPLE_QUESTIONS
         ]
         forecast_reports = asyncio.run(
-            template_bot.forecast_questions(questions, return_exceptions=True)
+            superforecaster.forecast_questions(questions, return_exceptions=True)
         )
-    TemplateForecaster.log_report_summary(forecast_reports)  # type: ignore
+    
+    # Log the results
+    SuperForecaster.log_report_summary(forecast_reports)  # type: ignore

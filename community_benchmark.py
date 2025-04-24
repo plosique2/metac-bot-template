@@ -18,7 +18,7 @@ from forecasting_tools import (
     run_benchmark_streamlit_page,
 )
 
-from main import TemplateForecaster
+from main import SuperForecaster
 
 logger = logging.getLogger(__name__)
 
@@ -58,25 +58,55 @@ async def benchmark_forecast_bot(mode: str) -> None:
 
     with MonetaryCostManager() as cost_manager:
         bots = [
-            TemplateForecaster(
-                predictions_per_research_report=5,
+            # Standard configuration superforecaster
+            SuperForecaster(
+                research_reports_per_question=2,
+                predictions_per_research_report=7,
+                use_research_summary_to_forecast=True,
                 llms={
                     "default": GeneralLlm(
+                        model="gpt-4o-mini",
+                        temperature=0.2,
+                    ),
+                    "summarizer": GeneralLlm(
                         model="gpt-4o-mini",
                         temperature=0.3,
                     ),
                 },
             ),
-            TemplateForecaster(
-                predictions_per_research_report=1,
+            # Higher temperature version (more exploratory)
+            SuperForecaster(
+                research_reports_per_question=2,
+                predictions_per_research_report=7,
+                use_research_summary_to_forecast=True,
                 llms={
                     "default": GeneralLlm(
+                        model="gpt-4o-mini",
+                        temperature=0.5, # Higher temperature
+                    ),
+                    "summarizer": GeneralLlm(
                         model="gpt-4o-mini",
                         temperature=0.3,
                     ),
                 },
             ),
-            # Add other ForecastBots here (or same bot with different parameters)
+            # High prediction count version
+            SuperForecaster(
+                research_reports_per_question=1,
+                predictions_per_research_report=15, # More predictions for better aggregation
+                use_research_summary_to_forecast=True,
+                llms={
+                    "default": GeneralLlm(
+                        model="gpt-4o-mini",
+                        temperature=0.2,
+                    ),
+                    "summarizer": GeneralLlm(
+                        model="gpt-4o-mini",
+                        temperature=0.3,
+                    ),
+                },
+            ),
+            # Add other ForecastBots as needed
         ]
         bots = typeguard.check_type(bots, list[ForecastBot])
         benchmarks = await Benchmarker(
