@@ -166,20 +166,19 @@ class SuperForecaster(ForecastBot):
             f"\n\nThe question is: {question}"
         )
         
-        # Add date filters to get both recent and historical context
-        date_filters = {
-            "recent": {"start_date": "now-30d"},
-            "relevant_history": {"start_date": "now-2y", "end_date": "now-30d"}
-        }
-        
         # Get both recent and historical results
-        recent_response = await searcher.invoke(prompt + "\nPlease focus on the most recent developments.", date_filters["recent"])
-        historical_response = await searcher.invoke(prompt + "\nPlease focus on historical context and precedents.", date_filters["relevant_history"])
-        
-        # Combine results
-        combined_response = f"RECENT DEVELOPMENTS:\n{recent_response}\n\nHISTORICAL CONTEXT:\n{historical_response}"
-        
-        return combined_response
+        try:
+            # Default search (without date filters)
+            recent_response = await searcher.invoke(prompt + "\nPlease focus on the most recent developments.")
+            historical_response = await searcher.invoke(prompt + "\nPlease focus on historical context and precedents.")
+            
+            # Combine results
+            combined_response = f"RECENT DEVELOPMENTS:\n{recent_response}\n\nHISTORICAL CONTEXT:\n{historical_response}"
+            
+            return combined_response
+        except Exception as e:
+            logger.warning(f"Error in SmartSearcher.invoke: {str(e)}")
+            return ""
         
     async def _summarize_multi_source_research(self, combined_research: str, question: str) -> str:
         """
@@ -580,23 +579,23 @@ if __name__ == "__main__":
         "test_questions",
     ], "Invalid run mode"
 
-    # Create the superforecaster bot with enhanced configuration
+    # Create the superforecaster bot with configuration using OpenRouter models
     superforecaster = SuperForecaster(
         research_reports_per_question=2,  # Increased from 1 to get more diverse research
-        predictions_per_research_report=7, # Increased from 5 for better aggregation
+        predictions_per_research_report=5, # Increased for better aggregation
         use_research_summary_to_forecast=True,  # Enable summarization of research
         publish_reports_to_metaculus=True,
-        folder_to_save_reports_to="forecast_reports/",  # Save reports for analysis
+        folder_to_save_reports_to=None,  # Don't save reports to avoid file path errors
         skip_previously_forecasted_questions=True,
         llms={  # Specify models with parameters
             "default": GeneralLlm(
-                model="metaculus/anthropic/claude-3-5-sonnet-20241022",  # Using Anthropic's best model
+                model="openrouter/perplexity/sonar-reasoning",  # Using OpenRouter model
                 temperature=0.2,  # Lower temperature for more consistent outputs
                 timeout=60,  # Increased timeout for more thorough analysis
                 allowed_tries=3,  # More retries
             ),
             "summarizer": GeneralLlm(
-                model="metaculus/openai/gpt-4o-mini",  # Use cheaper model for summarization
+                model="openrouter/perplexity/sonar-reasoning",  # Using OpenRouter model for summarization
                 temperature=0.3,
                 timeout=30,
             ),
