@@ -29,7 +29,7 @@ async def benchmark_forecast_bot(mode: str) -> None:
     Run a benchmark that compares your forecasts against the community prediction
     """
 
-    number_of_questions = 30 # Recommend 100+ for meaningful error bars, but 30 is faster/cheaper
+    number_of_questions = 2 # Using a very small sample size for faster testing
     if mode == "display":
         run_benchmark_streamlit_page()
         return
@@ -58,55 +58,22 @@ async def benchmark_forecast_bot(mode: str) -> None:
 
     with MonetaryCostManager() as cost_manager:
         bots = [
-            # Standard configuration superforecaster
-            SuperForecaster(
-                research_reports_per_question=2,
-                predictions_per_research_report=7,
-                use_research_summary_to_forecast=True,
-                llms={
-                    "default": GeneralLlm(
-                        model="gpt-4o-mini",
-                        temperature=0.2,
-                    ),
-                    "summarizer": GeneralLlm(
-                        model="gpt-4o-mini",
-                        temperature=0.3,
-                    ),
-                },
-            ),
-            # Higher temperature version (more exploratory)
-            SuperForecaster(
-                research_reports_per_question=2,
-                predictions_per_research_report=7,
-                use_research_summary_to_forecast=True,
-                llms={
-                    "default": GeneralLlm(
-                        model="gpt-4o-mini",
-                        temperature=0.5, # Higher temperature
-                    ),
-                    "summarizer": GeneralLlm(
-                        model="gpt-4o-mini",
-                        temperature=0.3,
-                    ),
-                },
-            ),
-            # High prediction count version
+            # Single Superforecaster with one research report and 5 predictions
             SuperForecaster(
                 research_reports_per_question=1,
-                predictions_per_research_report=15, # More predictions for better aggregation
+                predictions_per_research_report=5,
                 use_research_summary_to_forecast=True,
                 llms={
                     "default": GeneralLlm(
-                        model="gpt-4o-mini",
+                        model="openrouter/perplexity/sonar-reasoning",
                         temperature=0.2,
                     ),
                     "summarizer": GeneralLlm(
-                        model="gpt-4o-mini",
+                        model="openrouter/perplexity/sonar-reasoning",
                         temperature=0.3,
                     ),
                 },
             ),
-            # Add other ForecastBots as needed
         ]
         bots = typeguard.check_type(bots, list[ForecastBot])
         benchmarks = await Benchmarker(

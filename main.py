@@ -27,95 +27,42 @@ logger = logging.getLogger(__name__)
 
 class SuperForecaster(ForecastBot):
     """
-    Enhanced forecasting bot implementing superforecasting principles:
-    - Aggregates multiple diverse research sources for more robust information
+    Simplified forecasting bot implementing superforecasting principles:
     - Uses reference class forecasting to ground predictions in base rates
-    - Implements Tetlock's superforecasting principles: probabilistic thinking, belief updating, etc.
-    - Multiple prediction runs for higher accuracy and confidence intervals
+    - Implements Tetlock's superforecasting principles: probabilistic thinking, belief updating
+    - Streamlined for faster execution with reduced timeouts
 
     The main entry point of this bot is `forecast_on_tournament` in the parent class.
-    See the script at the bottom of the file for more details on how to run the bot.
     General flow:
     - Load questions from Metaculus
     - For each question
-        - Execute run_research a number of times equal to research_reports_per_question
-        - Execute respective run_forecast function `predictions_per_research_report * research_reports_per_question` times
-        - Aggregate the predictions using aggregation techniques from superforecasting
+        - Execute run_research once
+        - Execute respective run_forecast function with fewer predictions
         - Submit prediction (if publish_reports_to_metaculus is True)
     - Return a list of ForecastReport objects
-
-    If needed, a more sophisticated rate limiter is available:
-    ```
-    from forecasting_tools.ai_models.resource_managers.refreshing_bucket_rate_limiter import RefreshingBucketRateLimiter
-    rate_limiter = RefreshingBucketRateLimiter(
-        capacity=2,
-        refresh_rate=1,
-    ) # Allows 1 request per second on average with a burst of 2 requests initially
-    await self.rate_limiter.wait_till_able_to_acquire_resources(1)
-    ```
     """
 
-    _max_concurrent_questions = 3  # Increased for more parallel processing
+    _max_concurrent_questions = 4  # Increased for parallel processing
     _concurrency_limiter = asyncio.Semaphore(_max_concurrent_questions)
 
     async def run_research(self, question: MetaculusQuestion) -> str:
         """
-        Enhanced research function that tries to combine multiple sources 
-        when available for a more comprehensive analysis.
+        Simplified research function that prioritizes speed over comprehensiveness.
+        Only uses OpenRouter for research to avoid timeouts.
         """
         async with self._concurrency_limiter:
-            research_sources = []
-            
-            # Try to get research from each available provider
-            if os.getenv("EXA_API_KEY"):
-                try:
-                    exa_research = await self._call_exa_smart_searcher(question.question_text)
-                    if exa_research:
-                        research_sources.append(f"--- EXA SEARCH RESULTS ---\n{exa_research}")
-                except Exception as e:
-                    logger.warning(f"Error using Exa research for {question.page_url}: {str(e)}")
-            
-            if os.getenv("ASKNEWS_CLIENT_ID") and os.getenv("ASKNEWS_SECRET"):
-                try:
-                    asknews_research = await AskNewsSearcher().get_formatted_news_async(question.question_text)
-                    if asknews_research:
-                        research_sources.append(f"--- ASKNEWS SEARCH RESULTS ---\n{asknews_research}")
-                except Exception as e:
-                    logger.warning(f"Error using AskNews research for {question.page_url}: {str(e)}")
-            
-            if os.getenv("PERPLEXITY_API_KEY"):
-                try:
-                    perplexity_research = await self._call_perplexity(question.question_text)
-                    if perplexity_research:
-                        research_sources.append(f"--- PERPLEXITY SEARCH RESULTS ---\n{perplexity_research}")
-                except Exception as e:
-                    logger.warning(f"Error using Perplexity research for {question.page_url}: {str(e)}")
-            
-            elif os.getenv("OPENROUTER_API_KEY") and not research_sources:
+            # Only use OpenRouter - fastest and most reliable option
+            if os.getenv("OPENROUTER_API_KEY"):
                 try:
                     openrouter_research = await self._call_perplexity(question.question_text, use_open_router=True)
                     if openrouter_research:
-                        research_sources.append(f"--- OPENROUTER SEARCH RESULTS ---\n{openrouter_research}")
+                        logger.info(f"Found Research for URL {question.page_url}")
+                        return f"--- OPENROUTER SEARCH RESULTS ---\n{openrouter_research}"
                 except Exception as e:
                     logger.warning(f"Error using OpenRouter research for {question.page_url}: {str(e)}")
             
-            # Combine all research sources
-            if research_sources:
-                combined_research = "\n\n".join(research_sources)
-                
-                # If we have multiple sources, add a summarization step
-                if len(research_sources) > 1:
-                    try:
-                        summary = await self._summarize_multi_source_research(combined_research, question.question_text)
-                        combined_research = f"--- RESEARCH SUMMARY ---\n{summary}\n\n--- DETAILED SOURCES ---\n{combined_research}"
-                    except Exception as e:
-                        logger.warning(f"Error summarizing multi-source research: {str(e)}")
-                
-                logger.info(f"Found Research for URL {question.page_url}")
-                return combined_research
-            else:
-                logger.warning(f"No research provider found when processing question URL {question.page_url}. Will pass back empty string.")
-                return ""
+            logger.warning(f"No research provider found when processing question URL {question.page_url}. Will pass back empty string.")
+            return ""
 
     async def _call_perplexity(
         self, question: str, use_open_router: bool = False
@@ -182,34 +129,27 @@ class SuperForecaster(ForecastBot):
         
     async def _summarize_multi_source_research(self, combined_research: str, question: str) -> str:
         """
-        Summarizes research from multiple sources to create a unified view, highlighting 
-        agreements and contradictions.
+        Summarizes research from multiple sources - shortened for speed
         """
         summarization_prompt = clean_indents(
             f"""
             You are a research analyst assisting a superforecaster.
             
-            QUESTION TO FORECAST:
-            {question}
+            QUESTION: {question}
             
-            You have been given research from multiple sources, and your job is to synthesize 
-            this information into a cohesive summary. Focus on:
+            Synthesize this research into a concise summary:
+            1. Key facts and statistics (2-3 bullet points)
+            2. Most relevant reference classes and base rates
+            3. Areas of uncertainty (1-2 points)
+            4. Current trend direction
             
-            1. Key facts and data points that appear across multiple sources (high confidence)
-            2. Important points mentioned by only one source (require verification)
-            3. Any contradictions between sources (highlight uncertainty)
-            4. Relevant base rates and reference classes for this type of question
-            5. Current trends and how they might evolve
-            6. Identify what information is still missing that would be valuable
+            FORMAT: 
+            - Key Facts (2-3 points)
+            - Critical Data (numbers and dates only)
+            - Reference Classes
+            - Uncertainties
             
-            FORMAT YOUR RESPONSE:
-            - Summary of Key Facts (75-150 words)
-            - Critical Data Points (bullet points of numbers, statistics, dates)
-            - Identified Reference Classes & Base Rates
-            - Areas of Uncertainty
-            - Current Trajectory
-            
-            RESEARCH FROM MULTIPLE SOURCES:
+            RESEARCH:
             {combined_research}
             """
         )
@@ -235,61 +175,28 @@ class SuperForecaster(ForecastBot):
             f"""
             You are a superforecaster trained in Tetlock's techniques for making accurate predictions.
             
-            QUESTION:
-            {question.question_text}
-
-            BACKGROUND:
-            {question.background_info}
-
-            RESOLUTION CRITERIA:
-            {question.resolution_criteria}
-            
-            FINE PRINT:
-            {question.fine_print}
-
-            RESEARCH:
-            {research}
-
-            TODAY'S DATE:
-            {datetime.now().strftime("%Y-%m-%d")}
+            QUESTION: {question.question_text}
+            BACKGROUND: {question.background_info}
+            RESOLUTION CRITERIA: {question.resolution_criteria}
+            FINE PRINT: {question.fine_print}
+            RESEARCH: {research}
+            TODAY'S DATE: {datetime.now().strftime("%Y-%m-%d")}
             
             FORECASTING PROCESS:
-            Follow this structured superforecasting approach carefully:
-            
             1) REFERENCE CLASSES & BASE RATES
-            - Identify at least 2-3 relevant reference classes for this question
-            - Research and state the base rates for each reference class 
-            - Assess which reference class is most applicable and why
+            - Identify 1-2 reference classes and their base rates
             
-            2) OUTSIDE VIEW VS INSIDE VIEW
-            - Outside view: What does history suggest about questions like this?
-            - Inside view: What specific factors make this situation unique?
-            - How should we weigh outside vs inside view for this question?
+            2) KEY UNCERTAINTIES
+            - List 2-3 key variables that will influence the outcome
             
-            3) KEY UNCERTAINTIES & VARIABLES
-            - List 3-5 key variables that will influence the outcome
-            - For each variable, estimate its impact on the probability
+            3) PRE-MORTEM ANALYSIS
+            - Brief YES/NO resolution scenarios
             
-            4) PRE-MORTEM ANALYSIS
-            - Imagine it is resolution date and the answer is YES. Why did this happen?
-            - Imagine it is resolution date and the answer is NO. Why did this happen?
+            4) MULTIPLE PERSPECTIVES
+            - Consider conservative, aggressive, and expert views
             
-            5) FERMI DECOMPOSITION
-            - Break down this question into sub-components if applicable
-            - Calculate a probability based on the decomposition
-            
-            6) TIME HORIZON CONSIDERATIONS
-            - Analyze how the time until resolution affects your forecast
-            - Consider scenarios where events accelerate or decelerate
-            
-            7) MULTIPLE PERSPECTIVES
-            - Perspective 1: What would a conservative forecaster predict?
-            - Perspective 2: What would an aggressive forecaster predict?
-            - Perspective 3: What would a domain expert predict?
-            
-            8) FINAL SYNTHESIS
-            - Synthesize the above analyses into a probability judgment
-            - Explain which factors were most influential in your forecast
+            5) FINAL SYNTHESIS
+            - Synthesize into a probability judgment
             
             FINAL PROBABILITY:
             State your final prediction as: "Probability: ZZ%", where ZZ is between 0-100.
@@ -322,70 +229,30 @@ class SuperForecaster(ForecastBot):
             f"""
             You are an elite superforecaster specializing in multiple choice probabilistic forecasting.
 
-            QUESTION:
-            {question.question_text}
-
-            OPTIONS:
-            {question.options}
-
-            BACKGROUND:
-            {question.background_info}
-
-            RESOLUTION CRITERIA:
-            {question.resolution_criteria}
-
-            FINE PRINT:
-            {question.fine_print}
-
-            RESEARCH:
-            {research}
-
-            TODAY'S DATE:
-            {datetime.now().strftime("%Y-%m-%d")}
+            QUESTION: {question.question_text}
+            OPTIONS: {question.options}
+            BACKGROUND: {question.background_info}
+            RESOLUTION CRITERIA: {question.resolution_criteria}
+            FINE PRINT: {question.fine_print}
+            RESEARCH: {research}
+            TODAY'S DATE: {datetime.now().strftime("%Y-%m-%d")}
 
             FORECASTING PROCESS:
-            Follow this structured superforecasting approach for multiple choice questions:
-
             1) INITIAL ASSESSMENT
-            - For each option, identify its initial plausibility
-            - Consider the status quo and what would happen if nothing changed
-            - Identify which option(s) are considered the most likely by experts/markets
-
+            - Evaluate each option's baseline plausibility
+            
             2) REFERENCE CLASSES
-            - For each option, identify relevant reference classes and base rates
-            - Compare the current situation to historical analogs
-            - Estimate the frequency with which similar options prevailed in comparable situations
-
-            3) OPTION-SPECIFIC ANALYSIS
-            - For each option, analyze the specific conditions needed for it to be the outcome
-            - Estimate the likelihood of those conditions occurring
-            - Consider unique factors that make each option more or less likely than historical base rates
-
-            4) KEY DRIVERS & UNCERTAINTIES
-            - Identify the key variables that could influence which option prevails
-            - For each variable, assess how likely it is to move in a direction favorable to each option
-            - Consider contingencies and dependencies between variables
-
-            5) SCENARIO MAPPING
-            - Map different possible future scenarios to each option
-            - Consider specific paths and timelines that lead to each option
-            - Identify critical junctures and decision points
-
-            6) CROSS-IMPACT ANALYSIS
-            - Analyze how the options interact with one another
-            - Consider whether some options are mutually exclusive or complementary
-            - Account for the possibility that the "correct" option might be a combination of listed options
-
-            7) MULTI-PERSPECTIVE FORECASTING
-            - Adopt different perspectives (optimistic, pessimistic, status quo, domain expert, etc.)
-            - Generate probability distributions from each perspective
-            - Reconcile these perspectives into a single coherent distribution
-
-            8) CALIBRATION & COHERENCE CHECK
+            - Identify relevant historical analogs for each option
+            
+            3) KEY DRIVERS
+            - List 2-3 key variables that could influence which option prevails
+            
+            4) MULTI-PERSPECTIVE FORECASTING
+            - Consider optimistic, pessimistic, and expert perspectives
+            
+            5) CALIBRATION CHECK
             - Ensure probabilities sum to 100%
-            - Leave appropriate probability mass on "unlikely" options to account for surprises
-            - Check that your distribution isn't overconfident or underconfident
-            - Consider whether your relative confidences across options are justified
+            - Verify distribution isn't overconfident
 
             FINAL FORECAST:
             List your final probability for each option in the exact order specified: {question.options}
@@ -396,7 +263,10 @@ class SuperForecaster(ForecastBot):
             ...
             Option_N: Probability_N%
             
-            The probabilities must sum to 100%.
+            CRITICAL REQUIREMENTS:
+            1. The probabilities must sum to 100%.
+            2. No probability should be exactly 0% or 100% (use 0.1% for very unlikely options and 99.9% for very likely ones)
+            3. Each percentage must be a positive number
             """
         )
         
@@ -420,97 +290,49 @@ class SuperForecaster(ForecastBot):
         self, question: NumericQuestion, research: str
     ) -> ReasonedPrediction[NumericDistribution]:
         """
-        Enhanced numeric forecasting method implementing superforecasting techniques
-        for continuous distributions and calibration.
+        Optimized numeric forecasting method with reduced prompt length
+        and explicit formatting requirements to ensure valid percentiles.
         """
         upper_bound_message, lower_bound_message = (
             self._create_upper_and_lower_bound_messages(question)
         )
         
+        # If research is empty, provide a fallback
+        if not research.strip():
+            research = "No specific research was found. Use your general knowledge."
+        
         prompt = clean_indents(
             f"""
-            You are a world-class superforecaster specializing in quantitative predictions using techniques from statistics, decision science, and cognitive psychology.
-
-            QUESTION:
+            You're a numeric forecaster making a prediction:
             {question.question_text}
 
-            BACKGROUND:
-            {question.background_info}
-
-            RESOLUTION CRITERIA:
-            {question.resolution_criteria}
-
-            FINE PRINT:
-            {question.fine_print}
-
-            UNITS FOR ANSWER: 
-            {question.unit_of_measure if question.unit_of_measure else "Not stated (please infer this)"}
-
-            RESEARCH:
-            {research}
-
-            TODAY'S DATE:
-            {datetime.now().strftime("%Y-%m-%d")}
-
-            BOUNDS:
+            Background: {question.background_info}
+            Resolution: {question.resolution_criteria}
+            Units: {question.unit_of_measure if question.unit_of_measure else "Not stated"}
+            Research: {research}
+            Date: {datetime.now().strftime("%Y-%m-%d")}
             {lower_bound_message}
             {upper_bound_message}
 
-            FORECASTING PROCESS:
-            Follow this structured process for making a precise quantitative forecast:
+            ⚠️ CRITICAL: Your response MUST end with six percentile values in EXACTLY this format ⚠️
 
-            1) KEY METRICS & HISTORICAL DATA
-            - Identify key metrics related to this question
-            - Analyze historical trends and growth/decline rates
-            - Calculate relevant summary statistics (mean, median, growth rates)
+            First, briefly analyze:
+            1) Time until resolution
+            2) Baseline outcome
+            3) Trend-based outcome
+            4) Expert expectations
+            5) Low and high scenarios
 
-            2) COMPARABLE REFERENCE POINTS
-            - Identify comparable situations, entities, or historical periods 
-            - Extract numeric values from these comparables
-            - Calculate typical ranges and distributions
+            Then provide your final percentiles following this EXACT format. Do not use markdown tables or any other format:
 
-            3) MODEL BUILDING
-            - Develop a simple model of the factors influencing this number
-            - Weight each factor by importance
-            - Consider how factors interact (multiplicative vs. additive effects)
+            Percentile 10: X
+            Percentile 20: Y
+            Percentile 40: Z
+            Percentile 60: A
+            Percentile 80: B
+            Percentile 90: C
 
-            4) SCENARIO ANALYSIS
-            - Baseline scenario: What happens if current trends continue?
-            - Pessimistic scenario: What realistic factors could drive the number lower?
-            - Optimistic scenario: What realistic factors could drive the number higher?
-            - Wild card scenario: What low-probability events could dramatically change the outcome?
-
-            5) MONTE CARLO SIMULATION REASONING
-            - Consider the distribution shape (normal, log-normal, power law, etc.)
-            - Identify key uncertainties and their distributions
-            - Reason through how these uncertainties would combine
-
-            6) FORECAST DISTRIBUTION
-            - Generate a full probability distribution, not just a point estimate
-            - Identify the median, mean, and various percentiles (10, 20, 40, 60, 80, 90)
-            - Check that these values are coherent (e.g., 80th percentile > 60th percentile)
-            - Ensure your distribution accounts for tail risks and unknown unknowns
-            - Double-check that your distribution respects any hard bounds specified
-
-            7) CALIBRATION CHECK
-            - How often have past forecasts in this domain been too high or too low?
-            - Do you need to widen your confidence intervals to avoid overconfidence?
-            - Would other forecasters produce similar or different distributions?
-
-            FORMATTING INSTRUCTIONS:
-            - Use the exact units requested (e.g., whether a number should be 1,000,000 or 1 million)
-            - Never use scientific notation
-            - Use comma separators for thousands (e.g., 1,234,567)
-            - Always arrange percentiles from smaller to larger numbers
-
-            FINAL FORECAST:
-            Provide your distribution as:
-            Percentile 10: XX
-            Percentile 20: XX
-            Percentile 40: XX
-            Percentile 60: XX
-            Percentile 80: XX
-            Percentile 90: XX
+            Where X < Y < Z < A < B < C (values must be strictly increasing).
             """
         )
         
@@ -579,11 +401,11 @@ if __name__ == "__main__":
         "test_questions",
     ], "Invalid run mode"
 
-    # Create the superforecaster bot with configuration using OpenRouter models
+    # Create the superforecaster bot with optimized settings for speed
     superforecaster = SuperForecaster(
-        research_reports_per_question=2,  # Increased from 1 to get more diverse research
-        predictions_per_research_report=5, # Increased for better aggregation
-        use_research_summary_to_forecast=True,  # Enable summarization of research
+        research_reports_per_question=1,  # Reduced to speed up processing
+        predictions_per_research_report=3, # Reduced for faster aggregation
+        use_research_summary_to_forecast=True,  # Keep summarization for quality
         publish_reports_to_metaculus=True,
         folder_to_save_reports_to=None,  # Don't save reports to avoid file path errors
         skip_previously_forecasted_questions=True,
@@ -591,13 +413,13 @@ if __name__ == "__main__":
             "default": GeneralLlm(
                 model="openrouter/perplexity/sonar-reasoning",  # Using OpenRouter model
                 temperature=0.2,  # Lower temperature for more consistent outputs
-                timeout=60,  # Increased timeout for more thorough analysis
-                allowed_tries=3,  # More retries
+                timeout=30,  # Reduced timeout for faster processing
+                allowed_tries=2,  # Reduced retries for speed
             ),
             "summarizer": GeneralLlm(
                 model="openrouter/perplexity/sonar-reasoning",  # Using OpenRouter model for summarization
                 temperature=0.3,
-                timeout=30,
+                timeout=15,  # Reduced timeout for faster processing
             ),
         },
     )
@@ -619,8 +441,8 @@ if __name__ == "__main__":
     elif run_mode == "test_questions":
         # Example questions for testing our superforecaster
         EXAMPLE_QUESTIONS = [
-            "https://www.metaculus.com/questions/578/human-extinction-by-2100/",  # Human Extinction - Binary
             "https://www.metaculus.com/questions/14333/age-of-oldest-human-as-of-2100/",  # Age of Oldest Human - Numeric
+            "https://www.metaculus.com/questions/578/human-extinction-by-2100/",  # Human Extinction - Binary
             "https://www.metaculus.com/questions/22427/number-of-new-leading-ai-labs/",  # Number of New Leading AI Labs - Multiple Choice
         ]
         superforecaster.skip_previously_forecasted_questions = False
